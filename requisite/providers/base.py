@@ -14,6 +14,7 @@ changes to any other part of the framework are needed.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import random
 import time
@@ -42,12 +43,20 @@ def network_errors() -> tuple[type[BaseException], ...]:
     ``google-genai``'s own transient list, which only has
     ``TimeoutException``/``ConnectError`` and so misses a mid-request
     ``ReadError`` (e.g. Windows ``WinError 10053``).
+
+    Newer SDKs (``google-genai`` 3.x, ``anthropic`` 1.x, ``openai`` 3.x) moved
+    to ``httpx2``, a separate package whose exceptions do *not* subclass
+    ``httpx``'s, so its ``TransportError`` is included too whenever it's
+    importable. Each is optional: only the ones actually installed are used.
     """
-    try:
-        import httpx
-    except ImportError:  # pragma: no cover - httpx ships with every httpx-based SDK
-        return (ConnectionError, TimeoutError)
-    return (httpx.TransportError, ConnectionError, TimeoutError)
+    errors: list[type[BaseException]] = []
+    for module_name in ("httpx", "httpx2"):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:  # pragma: no cover - depends on which SDKs are installed
+            continue
+        errors.append(module.TransportError)
+    return (*errors, ConnectionError, TimeoutError)
 
 
 class BaseProvider(ABC):

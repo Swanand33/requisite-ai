@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   method accepts it, and otherwise drops it with a one-time warning. Older
   SDKs (`0.116`-`0.125`) behave as before. The Anthropic test fakes now use
   real, explicit signatures so this class of SDK drift is caught.
+- `max_retries` was silently ignored for Gemini (and Ollama) connection errors
+  on SDKs that use `httpx2` (`google-genai` 3.x): `network_errors()` only
+  listed `httpx.TransportError`, and `httpx2`'s exceptions don't subclass it, so
+  a mid-request `ReadError` made one attempt instead of `max_retries + 1`. It
+  now includes `httpx2.TransportError` whenever `httpx2` is installed.
 
 ## [0.42.0] - 2026-10-04
 

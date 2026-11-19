@@ -1369,10 +1369,22 @@ def test_ollama_provider_does_not_require_api_key() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _read_error() -> Exception:
-    import httpx
+def _read_error(module_name: str = "httpx") -> Exception:
+    # Newer SDKs (google-genai 3.x, ...) use `httpx2`, whose exceptions do
+    # not subclass httpx's; both must be treated as transient.
+    module = pytest.importorskip(module_name)
+    return module.ReadError("[WinError 10053] connection aborted")  # type: ignore[no-any-return]
 
-    return httpx.ReadError("[WinError 10053] connection aborted")
+
+def test_network_errors_cover_both_httpx_and_httpx2() -> None:
+    from requisite.providers.base import network_errors
+
+    httpx2 = pytest.importorskip("httpx2")
+    errors = network_errors()
+    assert isinstance(_read_error("httpx"), errors)
+    assert isinstance(httpx2.ReadError("reset"), errors)
+    assert isinstance(httpx2.ConnectTimeout("slow"), errors)
+    assert not isinstance(ValueError("bad request"), errors)
 
 
 class _FlakyGeminiModels:
@@ -1421,6 +1433,27 @@ def test_gemini_provider_retries_a_transient_read_error_then_succeeds(
 
     assert response.content == "recovered"
     assert models.calls == 3  # two transient failures, then success
+
+
+@pytest.mark.parametrize("module_name", ["httpx", "httpx2"])
+def test_gemini_provider_retries_read_error_from_either_httpx_package(
+    fake_genai_module: types.ModuleType, module_name: str
+) -> None:
+    models = _FlakyGeminiModels(failures=2, error=_read_error(module_name))
+    provider = _flaky_gemini(models)
+
+    assert provider.chat([Message.user("hi")]).content == "recovered"
+    assert models.calls == 3
+
+
+async def test_gemini_provider_achat_retries_httpx2_read_error(
+    fake_genai_module: types.ModuleType,
+) -> None:
+    models = _AsyncFlakyGeminiModels(failures=2, error=_read_error("httpx2"))
+    provider = _flaky_gemini(models)
+
+    assert (await provider.achat([Message.user("hi")])).content == "recovered"
+    assert models.calls == 3
 
 
 def test_gemini_provider_raises_after_exhausting_retries(
