@@ -21,6 +21,7 @@ Install with: ``pip install anthropic``
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from collections.abc import AsyncIterator, Iterator, Sequence
@@ -60,6 +61,25 @@ def _finalize_streamed_tool_calls(blocks: dict[int, dict[str, Any]]) -> list[Too
             arguments = {}
         tool_calls.append(ToolCall(id=entry["id"], name=entry["name"], arguments=arguments))
     return tool_calls
+
+
+def _accepts_sampling_params(method: Any) -> bool:
+    """Whether an SDK method (``messages.create``/``parse``/``stream``) still
+    takes ``temperature``.
+
+    ``anthropic`` 1.0 removed ``temperature`` (and ``top_p``/``top_k``) from
+    those methods' signatures, so passing it raises ``TypeError`` before any
+    request is made. Older SDKs (``0.116`` ... ``0.125``) still accept it.
+    A method taking ``**kwargs``, or one whose signature can't be read, is
+    assumed to accept it -- the pre-existing behaviour.
+    """
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return True
+    return "temperature" in parameters or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+    )
 
 
 class AnthropicProvider(BaseProvider):
@@ -106,6 +126,7 @@ class AnthropicProvider(BaseProvider):
         self._max_tokens = max_tokens
         self._client: Any = None
         self._async_client: Any = None
+        self._warned_temperature = False
 
     @property
     def name(self) -> str:
@@ -135,6 +156,25 @@ class AnthropicProvider(BaseProvider):
         return client_cls(
             api_key=self._api_key, timeout=self._timeout, max_retries=self._max_retries
         )
+
+    def _sampling_params(self, method: Any, temperature: Optional[float]) -> dict[str, Any]:
+        """``{"temperature": ...}`` when set and supported by ``method``, else ``{}``.
+
+        On an SDK that no longer accepts it the value is dropped with a
+        one-time warning, rather than every call failing with a ``TypeError``.
+        """
+        if temperature is None:
+            return {}
+        if _accepts_sampling_params(method):
+            return {"temperature": temperature}
+        if not self._warned_temperature:
+            self._warned_temperature = True
+            logger.warning(
+                "The installed 'anthropic' SDK no longer accepts 'temperature'; "
+                "ignoring temperature=%s for Anthropic calls.",
+                temperature,
+            )
+        return {}
 
     def _to_anthropic_messages(
         self, messages: Sequence[Message]
@@ -222,7 +262,7 @@ class AnthropicProvider(BaseProvider):
                     max_tokens=max_tokens,
                     messages=anthropic_messages,
                     system=system or "",
-                    temperature=temperature,
+                    **self._sampling_params(client.messages.parse, temperature),
                     output_format=response_model,
                     **kwargs,
                 )
@@ -234,7 +274,7 @@ class AnthropicProvider(BaseProvider):
                     max_tokens=max_tokens,
                     messages=anthropic_messages,
                     system=system or "",
-                    temperature=temperature,
+                    **self._sampling_params(client.messages.create, temperature),
                     **kwargs,
                 )
         except Exception as exc:  # noqa: BLE001
@@ -268,7 +308,7 @@ class AnthropicProvider(BaseProvider):
                     max_tokens=max_tokens,
                     messages=anthropic_messages,
                     system=system or "",
-                    temperature=temperature,
+                    **self._sampling_params(client.messages.parse, temperature),
                     output_format=response_model,
                     **kwargs,
                 )
@@ -280,7 +320,7 @@ class AnthropicProvider(BaseProvider):
                     max_tokens=max_tokens,
                     messages=anthropic_messages,
                     system=system or "",
-                    temperature=temperature,
+                    **self._sampling_params(client.messages.create, temperature),
                     **kwargs,
                 )
         except Exception as exc:  # noqa: BLE001
@@ -316,7 +356,7 @@ class AnthropicProvider(BaseProvider):
                 max_tokens=max_tokens,
                 messages=anthropic_messages,
                 system=system or "",
-                temperature=temperature,
+                **self._sampling_params(client.messages.stream, temperature),
                 **kwargs,
             ) as stream:
                 for event in stream:
@@ -372,7 +412,7 @@ class AnthropicProvider(BaseProvider):
                 max_tokens=max_tokens,
                 messages=anthropic_messages,
                 system=system or "",
-                temperature=temperature,
+                **self._sampling_params(client.messages.stream, temperature),
                 **kwargs,
             ) as stream:
                 async for event in stream:

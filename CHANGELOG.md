@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `AnthropicProvider` failed every call with `anthropic>=1.0`, which removed
+  `temperature` from `messages.create`/`parse`/`stream`: the provider always
+  passed it, so each `chat`/`achat`/`stream`/`astream` raised a
+  `ProviderException` (`unexpected keyword argument 'temperature'`) before any
+  request was sent. It now passes `temperature` only when the installed SDK's
+  method accepts it, and otherwise drops it with a one-time warning. Older
+  SDKs (`0.116`-`0.125`) behave as before. The Anthropic test fakes now use
+  real, explicit signatures so this class of SDK drift is caught.
+
 ## [0.42.0] - 2026-10-04
 
 ### Added

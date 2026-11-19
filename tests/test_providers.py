@@ -893,6 +893,144 @@ def test_anthropic_provider_structured_output(monkeypatch: pytest.MonkeyPatch) -
     assert response.parsed == {"answer": "ok"}
 
 
+# anthropic 1.0 removed `temperature` from messages.create/parse/stream; the
+# permissive `**kwargs` fake above can't tell the difference, so these fakes
+# declare real, explicit signatures (no `**kwargs`) like the SDK itself.
+
+
+class _ModernAnthropicClient:
+    """Mimics ``anthropic>=1.0``: no ``temperature`` parameter anywhere."""
+
+    last_call: ClassVar[dict[str, Any]] = {}
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.messages = types.SimpleNamespace(
+            create=self._create, parse=self._parse, stream=self._stream
+        )
+
+    def _create(self, *, model: str, max_tokens: int, messages: Any, system: str = "") -> Any:
+        type(self).last_call = {"model": model, "max_tokens": max_tokens}
+        return _FakeAnthropicMessage([_FakeAnthropicTextBlock("ok")])
+
+    def _parse(
+        self, *, model: str, max_tokens: int, messages: Any, output_format: Any, system: str = ""
+    ) -> Any:
+        block = _FakeAnthropicTextBlock('{"answer": "ok"}')
+        block.parsed_output = {"answer": "ok"}
+        return _FakeAnthropicMessage([block])
+
+    def _stream(self, *, model: str, max_tokens: int, messages: Any, system: str = "") -> Any:
+        return _FakeAnthropicStream(
+            [
+                _FakeAnthropicStreamEvent(
+                    "content_block_delta", index=0, delta=_FakeAnthropicTextDelta("hi")
+                )
+            ]
+        )
+
+
+class _LegacyAnthropicClient(_ModernAnthropicClient):
+    """Mimics ``anthropic<1.0``: ``temperature`` is an explicit parameter."""
+
+    def _create(  # type: ignore[override]
+        self,
+        *,
+        model: str,
+        max_tokens: int,
+        messages: Any,
+        system: str = "",
+        temperature: Optional[float] = None,
+    ) -> Any:
+        type(self).last_call = {"temperature": temperature}
+        return _FakeAnthropicMessage([_FakeAnthropicTextBlock("ok")])
+
+
+def test_anthropic_provider_drops_temperature_on_sdk_without_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "Anthropic", _ModernAnthropicClient)
+    from requisite.providers.anthropic_provider import AnthropicProvider
+
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    with caplog.at_level("WARNING", logger="requisite.providers.anthropic"):
+        assert provider.chat([Message.user("hi")], temperature=0.2).content == "ok"
+        provider.chat([Message.user("hi")], temperature=0.2)
+    assert caplog.text.count("no longer accepts 'temperature'") == 1  # warns once
+
+
+def test_anthropic_provider_without_temperature_never_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "Anthropic", _ModernAnthropicClient)
+    from requisite.providers.anthropic_provider import AnthropicProvider
+
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    with caplog.at_level("WARNING", logger="requisite.providers.anthropic"):
+        provider.chat([Message.user("hi")])
+    assert "temperature" not in caplog.text
+
+
+def test_anthropic_provider_still_sends_temperature_on_older_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "Anthropic", _LegacyAnthropicClient)
+    from requisite.providers.anthropic_provider import AnthropicProvider
+
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    provider.chat([Message.user("hi")], temperature=0.3)
+    assert _LegacyAnthropicClient.last_call == {"temperature": 0.3}
+
+
+def test_anthropic_provider_structured_output_and_stream_on_sdk_without_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import anthropic
+    from pydantic import BaseModel
+
+    monkeypatch.setattr(anthropic, "Anthropic", _ModernAnthropicClient)
+    from requisite.providers.anthropic_provider import AnthropicProvider
+
+    class Answer(BaseModel):
+        answer: str
+
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    parsed = provider.chat([Message.user("?")], response_model=Answer, temperature=0.2)
+    assert parsed.parsed == {"answer": "ok"}
+    chunks = list(provider.stream([Message.user("hi")], temperature=0.2))
+    assert [c.delta for c in chunks] == ["hi", ""]
+
+
+async def test_anthropic_provider_async_paths_on_sdk_without_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import anthropic
+
+    class _AsyncModernClient(_ModernAnthropicClient):
+        async def _acreate(
+            self, *, model: str, max_tokens: int, messages: Any, system: str = ""
+        ) -> Any:
+            return self._create(model=model, max_tokens=max_tokens, messages=messages)
+
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.messages.create = self._acreate  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", _AsyncModernClient)
+    from requisite.providers.anthropic_provider import AnthropicProvider
+
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    response = await provider.achat([Message.user("hi")], temperature=0.2)
+    assert response.content == "ok"
+    chunks = [c async for c in provider.astream([Message.user("hi")], temperature=0.2)]
+    assert [c.delta for c in chunks] == ["hi", ""]
+
+
 def test_anthropic_provider_missing_sdk_raises_configuration_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
